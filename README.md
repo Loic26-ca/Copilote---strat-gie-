@@ -1,1 +1,1 @@
-Copilote_strategique
+Copilote_strategique.
