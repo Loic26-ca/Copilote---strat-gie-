@@ -1,0 +1,434 @@
+"use client";
+
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+
+const COLORS = {
+  bg: "#12172B",
+  panel: "#1A2140",
+  panelLight: "#212A4E",
+  brass: "#C9A24B",
+  brassDim: "#8C7538",
+  teal: "#4FA88F",
+  coral: "#C1543C",
+  ink: "#EDE6D6",
+  inkDim: "#9AA0BE",
+  line: "#33395C",
+};
+
+const DIMENSIONS = [
+  { key: "clients", label: "Clients", angle: -90, color: "#4FA88F" },
+  { key: "tresorerie", label: "Trésorerie", angle: 0, color: "#C9A24B" },
+  { key: "croissance", label: "Croissance", angle: 90, color: "#7B9EDB" },
+  { key: "visibilite", label: "Visibilité", angle: 180, color: "#C1543C" },
+];
+
+const BASELINE = 50;
+
+function loadProfile() {
+  try {
+    const raw = localStorage.getItem("sc:profile");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function saveProfile(p) {
+  try {
+    localStorage.setItem("sc:profile", JSON.stringify(p));
+  } catch (e) {
+    console.error("save profile failed", e);
+  }
+}
+function loadEntries() {
+  try {
+    const raw = localStorage.getItem("sc:entries");
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+function saveEntries(entries) {
+  try {
+    localStorage.setItem("sc:entries", JSON.stringify(entries));
+  } catch (e) {
+    console.error("save entries failed", e);
+  }
+}
+
+function computeScores(entries) {
+  const scores = { clients: BASELINE, tresorerie: BASELINE, croissance: BASELINE, visibilite: BASELINE };
+  const history = [{ label: "Départ", ...scores }];
+  entries.forEach((e, i) => {
+    if (e.dimension && scores[e.dimension] !== undefined) {
+      scores[e.dimension] = Math.max(0, Math.min(100, scores[e.dimension] + (e.delta || 0)));
+    }
+    history.push({ label: `#${i + 1}`, ...scores });
+  });
+  return { scores, history };
+}
+
+function Compass({ scores, size = 300 }) {
+  const cx = size / 2;
+  const cy = size / 2;
+  const maxR = size * 0.36;
+  const pt = (angleDeg, r) => {
+    const rad = (angleDeg * Math.PI) / 180;
+    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+  };
+  const poly = DIMENSIONS.map((d) => pt(d.angle, (scores[d.key] / 100) * maxR));
+  const polyStr = poly.map(([x, y]) => `${x},${y}`).join(" ");
+  const rings = [0.25, 0.5, 0.75, 1];
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ overflow: "visible" }}>
+      {rings.map((f) => (
+        <circle key={f} cx={cx} cy={cy} r={maxR * f} fill="none" stroke={COLORS.line} strokeWidth="1" />
+      ))}
+      {DIMENSIONS.map((d) => {
+        const [x, y] = pt(d.angle, maxR);
+        const [lx, ly] = pt(d.angle, maxR + 26);
+        return (
+          <g key={d.key}>
+            <line x1={cx} y1={cy} x2={x} y2={y} stroke={COLORS.line} strokeWidth="1" />
+            <text x={lx} y={ly} fill={COLORS.inkDim} fontSize="11" fontFamily="'IBM Plex Mono', monospace" textAnchor="middle" dominantBaseline="middle" letterSpacing="0.5">
+              {d.label.toUpperCase()}
+            </text>
+          </g>
+        );
+      })}
+      <circle cx={cx} cy={cy} r="3" fill={COLORS.brass} />
+      <polygon points={polyStr} fill={COLORS.brass} fillOpacity="0.18" stroke={COLORS.brass} strokeWidth="2" />
+      {poly.map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r="4" fill={DIMENSIONS[i].color} stroke={COLORS.bg} strokeWidth="1.5" />
+      ))}
+    </svg>
+  );
+}
+
+async function askCopilot({ profile, entries, situation, tags }) {
+  const response = await fetch("/api/copilot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile, entries, situation, tags }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Erreur du copilote");
+  return data;
+}
+
+const TAGS = ["Client", "Argent", "Temps", "Concurrence", "Équipe", "Autre"];
+
+function Tag({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        fontFamily: "'IBM Plex Sans', sans-serif",
+        fontSize: 13,
+        padding: "6px 12px",
+        borderRadius: 999,
+        border: `1px solid ${active ? COLORS.brass : COLORS.line}`,
+        background: active ? "rgba(201,162,75,0.15)" : "transparent",
+        color: active ? COLORS.brass : COLORS.inkDim,
+        cursor: "pointer",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DimensionPill({ dim, delta }) {
+  const d = DIMENSIONS.find((x) => x.key === dim);
+  if (!d) return null;
+  const positive = delta >= 0;
+  return (
+    <span
+      style={{
+        fontFamily: "'IBM Plex Mono', monospace",
+        fontSize: 12,
+        color: d.color,
+        border: `1px solid ${d.color}55`,
+        borderRadius: 6,
+        padding: "3px 8px",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+      }}
+    >
+      {d.label} {positive ? "▲" : "▼"} {Math.abs(delta)}
+    </span>
+  );
+}
+
+const labelStyle = {
+  display: "block",
+  fontFamily: "'IBM Plex Mono', monospace",
+  fontSize: 11,
+  letterSpacing: 1,
+  color: COLORS.inkDim,
+  marginBottom: 8,
+  textTransform: "uppercase",
+};
+
+const inputStyle = {
+  width: "100%",
+  boxSizing: "border-box",
+  padding: "12px 14px",
+  borderRadius: 8,
+  border: `1px solid ${COLORS.line}`,
+  background: COLORS.panel,
+  color: COLORS.ink,
+  fontFamily: "'IBM Plex Sans', sans-serif",
+  fontSize: 15,
+  outline: "none",
+};function Onboarding({ onDone }) {
+  const [name, setName] = useState("");
+  const [sector, setSector] = useState("");
+
+  const submit = () => {
+    if (!name.trim() || !sector.trim()) return;
+    const profile = { name: name.trim(), sector: sector.trim(), startedAt: new Date().toISOString() };
+    saveProfile(profile);
+    onDone(profile);
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: COLORS.bg, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ maxWidth: 440, width: "100%" }}>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 3, color: COLORS.brassDim, marginBottom: 10, textTransform: "uppercase" }}>
+          Journal de bord
+        </div>
+        <h1 style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 36, color: COLORS.ink, margin: "0 0 12px 0", lineHeight: 1.15 }}>
+          Avant d'appareiller, situons le navire.
+        </h1>
+        <p style={{ fontFamily: "'IBM Plex Sans', sans-serif", color: COLORS.inkDim, fontSize: 15, marginBottom: 32 }}>
+          Deux informations, et le copilote peut commencer à t'accompagner décision après décision.
+        </p>
+        <label style={labelStyle}>Nom de l'entreprise</label>
+        <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. Atelier Rive Gauche" />
+        <label style={{ ...labelStyle, marginTop: 18 }}>Secteur d'activité</label>
+        <input style={inputStyle} value={sector} onChange={(e) => setSector(e.target.value)} placeholder="Ex. menuiserie, traiteur, conseil..." />
+        <button
+          onClick={submit}
+          disabled={!name.trim() || !sector.trim()}
+          style={{
+            marginTop: 28,
+            width: "100%",
+            padding: "13px 0",
+            borderRadius: 8,
+            border: "none",
+            background: name.trim() && sector.trim() ? COLORS.brass : COLORS.panelLight,
+            color: name.trim() && sector.trim() ? "#1A1508" : COLORS.inkDim,
+            fontFamily: "'IBM Plex Sans', sans-serif",
+            fontWeight: 600,
+            fontSize: 15,
+            cursor: name.trim() && sector.trim() ? "pointer" : "not-allowed",
+          }}
+        >
+          Ouvrir le journal
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function Home() {
+  const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState(null);
+  const [entries, setEntries] = useState([]);
+  const [situation, setSituation] = useState("");
+  const [activeTags, setActiveTags] = useState([]);
+  const [thinking, setThinking] = useState(false);
+  const [error, setError] = useState(null);
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    setProfile(loadProfile());
+    setEntries(loadEntries());
+    setLoading(false);
+  }, []);
+
+  const toggleTag = (t) => {
+    setActiveTags((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
+  };
+
+  const submitSituation = useCallback(async () => {
+    if (!situation.trim() || thinking) return;
+    setThinking(true);
+    setError(null);
+    try {
+      const result = await askCopilot({ profile, entries, situation: situation.trim(), tags: activeTags });
+      const newEntry = {
+        id: `${Date.now()}`,
+        date: new Date().toISOString(),
+        text: situation.trim(),
+        tags: activeTags,
+        diagnostic: result.diagnostic,
+        action: result.action,
+        dimension: result.dimension,
+        delta: typeof result.delta === "number" ? result.delta : 0,
+        risque: result.risque || null,
+        done: false,
+      };
+      const next = [...entries, newEntry];
+      setEntries(next);
+      saveEntries(next);
+      setSituation("");
+      setActiveTags([]);
+      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    } catch (e) {
+      console.error(e);
+      setError("Le copilote n'a pas pu répondre. Réessaie dans un instant.");
+    } finally {
+      setThinking(false);
+    }
+  }, [situation, activeTags, entries, profile, thinking]);
+
+  const toggleDone = (id) => {
+    const next = entries.map((e) => (e.id === id ? { ...e, done: !e.done } : e));
+    setEntries(next);
+    saveEntries(next);
+  };
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: COLORS.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: COLORS.inkDim, fontSize: 13 }}>Chargement du journal...</span>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return <Onboarding onDone={setProfile} />;
+  }
+
+  const { scores, history } = computeScores(entries);
+  const doneCount = entries.filter((e) => e.done).length;
+
+  return (
+    <div style={{ minHeight: "100vh", background: COLORS.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: COLORS.ink }}>
+      <div style={{ borderBottom: `1px solid ${COLORS.line}`, padding: "22px 28px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 3, color: COLORS.brassDim, textTransform: "uppercase" }}>
+              Copilote stratégique
+            </div>
+            <h1 style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 28, margin: "4px 0 0 0" }}>{profile.name}</h1>
+            <div style={{ fontSize: 13, color: COLORS.inkDim, marginTop: 2 }}>{profile.sector}</div>
+          </div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.inkDim, textAlign: "right" }}>
+            {entries.length} entrée{entries.length !== 1 ? "s" : ""} · {doneCount} action{doneCount !== 1 ? "s" : ""} menée{doneCount !== 1 ? "s" : ""}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "32px 24px 80px", display: "grid", gridTemplateColumns: "minmax(280px, 340px) 1fr", gap: 32 }}>
+        <div>
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 12, padding: 20, display: "flex", flexDirection: "column", alignItems: "center" }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 2, color: COLORS.inkDim, textTransform: "uppercase", alignSelf: "flex-start", marginBottom: 8 }}>
+              Cap actuel
+            </div>
+            <Compass scores={scores} size={260} />
+          </div>
+
+          {entries.length > 0 && (
+            <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 12, padding: "20px 12px 8px", marginTop: 20 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 2, color: COLORS.inkDim, textTransform: "uppercase", marginBottom: 4, paddingLeft: 8 }}>
+                Trajectoire
+              </div>
+              <ResponsiveContainer width="100%" height={160}>
+                <AreaChart data={history} margin={{ top: 10, right: 14, left: -14, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="scoreFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={COLORS.brass} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={COLORS.brass} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke={COLORS.line} vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: COLORS.inkDim, fontSize: 10, fontFamily: "IBM Plex Mono" }} axisLine={{ stroke: COLORS.line }} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fill: COLORS.inkDim, fontSize: 10, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} width={28} />
+                  <Tooltip contentStyle={{ background: COLORS.panelLight, border: `1px solid ${COLORS.line}`, borderRadius: 8, fontSize: 12, fontFamily: "IBM Plex Sans" }} labelStyle={{ color: COLORS.ink }} />
+                  {DIMENSIONS.map((d) => (
+                    <Area key={d.key} type="monotone" dataKey={d.key} stroke={d.color} strokeWidth={2} fill="url(#scoreFill)" dot={false} />
+                  ))}
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 12, padding: 20 }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 2, color: COLORS.inkDim, textTransform: "uppercase", marginBottom: 10 }}>
+              Nouvelle entrée
+            </div>
+            <textarea
+              value={situation}
+              onChange={(e) => setSituation(e.target.value)}
+              placeholder="Qu'est-ce qui se passe aujourd'hui dans l'entreprise ?"
+              rows={4}
+              style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Sans', sans-serif" }}
+            />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+              {TAGS.map((t) => (
+                <Tag key={t} active={activeTags.includes(t)} onClick={() => toggleTag(t)}>
+                  {t}
+                </Tag>
+              ))}
+            </div>
+            {error && <div style={{ color: COLORS.coral, fontSize: 13, marginTop: 10 }}>{error}</div>}
+            <button
+              onClick={submitSituation}
+              disabled={!situation.trim() || thinking}
+              style={{
+                marginTop: 16,
+                padding: "11px 20px",
+                borderRadius: 8,
+                border: "none",
+                background: situation.trim() && !thinking ? COLORS.brass : COLORS.panelLight,
+                color: situation.trim() && !thinking ? "#1A1508" : COLORS.inkDim,
+                fontFamily: "'IBM Plex Sans', sans-serif",
+                fontWeight: 600,
+                fontSize: 14,
+                cursor: situation.trim() && !thinking ? "pointer" : "not-allowed",
+              }}
+            >
+              {thinking ? "Le copilote réfléchit..." : "Consulter le copilote"}
+            </button>
+          </div>
+
+          <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 14 }}>
+            {entries.length === 0 && !thinking && (
+              <div style={{ color: COLORS.inkDim, fontSize: 14, fontStyle: "italic", padding: "20px 4px" }}>
+                Le journal est vide. La première entrée fixe le point de départ du cap.
+              </div>
+            )}
+            {[...entries].reverse().map((e) => (
+              <div key={e.id} style={{ background: COLORS.panel, border: `1px solid ${COLORS.line}`, borderRadius: 12, padding: 18 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkDim }}>
+                    {new Date(e.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" })}
+                  </div>
+                  <DimensionPill dim={e.dimension} delta={e.delta} />
+                </div>
+                <p style={{ fontSize: 14, color: COLORS.inkDim, margin: "10px 0 8px", lineHeight: 1.5 }}>{e.text}</p>
+                <p style={{ fontFamily: "'Fraunces', serif", fontSize: 16, margin: "0 0 10px", lineHeight: 1.4 }}>{e.diagnostic}</p>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10, background: COLORS.panelLight, borderRadius: 8, padding: "10px 12px" }}>
+                  <input type="checkbox" checked={e.done} onChange={() => toggleDone(e.id)} style={{ marginTop: 3, accentColor: COLORS.teal, cursor: "pointer" }} />
+                  <div>
+                    <div style={{ fontSize: 11, color: COLORS.brass, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: 1, marginBottom: 3 }}>ACTION</div>
+                    <div style={{ fontSize: 14, textDecoration: e.done ? "line-through" : "none", opacity: e.done ? 0.6 : 1 }}>{e.action}</div>
+                  </div>
+                </div>
+                {e.risque && <div style={{ fontSize: 12.5, color: COLORS.coral, marginTop: 10 }}>⚠ {e.risque}</div>}
+              </div>
+            ))}
+            <div ref={bottomRef} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
